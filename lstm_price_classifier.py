@@ -33,8 +33,8 @@ VERBOSE = False
 # optimization
 ########################################################################################################################
 def optuna_optimization():
-    n_trials = 2
-    n_jobs = 2
+    n_trials = 50
+    n_jobs = 1
     optuna_study = optuna.create_study(study_name='classification_optimization', storage='sqlite:///params.sqlite',
                                        load_if_exists=True)
     optuna_study.optimize(optimize_model, n_trials=n_trials, n_jobs=n_jobs)
@@ -47,7 +47,7 @@ def model_parameter_distributions(trial):
         'Dropout_04': trial.suggest_loguniform('Dropout_04', 0.05, 0.5),
         'learning_rate': trial.suggest_loguniform('learning_rate', 0.0001, 0.01),
         'decay_adam': trial.suggest_loguniform('decay_adam', 1e-8, 1e-4),
-        'sequence_len': int(trial.suggest_uniform('sequence_len', 6, 24 * 3)),
+        'sequence_len': int(trial.suggest_int('sequence_len', 6, 24 * 3)),
     }
 
 def run_base_model(**parameters):
@@ -386,7 +386,8 @@ def build_model(**parameters):
               validation_data=(validation_x, validation_y))  # callbacks=[tensorboard,checkpoint]
 
     # Score model
-    score = model.evaluate(validation_x, validation_y, verbose=0)
+    length_valid = int(len(validation_x)/2)
+    score = model.evaluate(validation_x[:length_valid], validation_y[:length_valid], verbose=0)
     print('Test loss:', score[0])
     print('Test accuracy:', score[1])
 
