@@ -24,10 +24,11 @@ SENTIMENT_DATA_TOTAL = None #"training_datas/sentiment_total.csv"
 SEQUENCE_LEN = int(45.6193325687566)
 NUM_NEURONS = 128
 BATCH_SIZE = 128
-EPOCHS = 5  # 20 how many passes through our data
+EPOCHS = 20  # 20 how many passes through our data
 SAVE_MODEL = True
 SENTIMENT_HEADERS =[]
 VERBOSE = False
+MARGIN_PERCENT = 0.005
 
 ########################################################################################################################
 # optimization
@@ -77,7 +78,7 @@ def get_historical_data():
 
     public_client = cbpro.PublicClient()
     start_date_his = '2019-07-14T21:00:00.0' #2019-07-14T21:00:00Z
-    end_date_his = '2019-07-27T12:00:00.0'
+    end_date_his = '2019-10-10T12:00:00.0'
 
     granularity = 3600
     num_data_call = 300
@@ -179,10 +180,12 @@ def build_test_validation_df(price_data=PRICE_DATA, sentiment_data=None):
 ########################################################################################################################
 
 def classify_sb(current, future):
-    if float(future) < float(current):
+    if float(future) < float(current * (1.0 - MARGIN_PERCENT)):
         return 0  # sell
-    elif float(future) > float(current):
-        return 1  # buy
+    elif float(future) > float(current * (1.0 + MARGIN_PERCENT)):
+        return 2  # buy
+    else:
+        return 1  # keep
 
 def prepare_sequential_data(main_df, sequence_len):
     df = main_df.copy(deep=True)
@@ -227,24 +230,28 @@ def process_sb_df(df, sequence_len):
     sequential_data, close_backup = prepare_sequential_data(df, sequence_len)
     random.shuffle(sequential_data)
 
-    buys = []
     sells = []
-
+    keeps = []
+    buys = []
     for seq, target in sequential_data:
         if target == 0:  # sell
             sells.append([seq, target])
-        elif target == 1:  # buy
+        elif target == 1:  # keep
+            keeps.append([seq, target])
+        elif target == 2:  # buy
             buys.append([seq, target])
 
-    random.shuffle(buys)
     random.shuffle(sells)
+    random.shuffle(keeps)
+    random.shuffle(buys)
 
-    lower = min(len(buys), len(sells))
+    lower = min(len(sells), len(keeps), len(buys))
 
-    buys = buys[:lower]
     sells = sells[:lower]
+    keeps = keeps[:lower]
+    buys = buys[:lower]
 
-    sequential_data = sells + buys
+    sequential_data = sells + keeps + buys
     random.shuffle(sequential_data)
 
     X = []
@@ -280,28 +287,30 @@ def test_model(sequence_len, test_type="val",model_path=MODEL_PATH):
     correct = 0
     long = False
     buy_price = -1.0
-    profit = 0.0
-    increment_parameter = 0.0
-    buy_threshold = 0.50
-    sell_threshold = 0.50
     fee = 0.25/100.0
     eur_capital = 1000.0
     btc_holds = 0.0
     for i in range(0, len(yhat)):
 
         mp = max(yhat[i])
-        buy = yhat[i][0]
-        sell = yhat[i][1]
+        sell = yhat[i][0]
+        keep = yhat[i][1]
+        buy = yhat[i][2]
 
         # add number of cases
-        if buy == mp:
+        if sell == mp:
+            yhat_labels.append(1)
+            if y_sequential[i] == 0:
+                correct += 1
+
+        if keep == mp:
             yhat_labels.append(1)
             if y_sequential[i] == 1:
                 correct += 1
 
-        elif sell == mp:
+        elif buy == mp:
             yhat_labels.append(0)
-            if y_sequential[i] == 0:
+            if y_sequential[i] == 2:
                 correct += 1
 
         if i == 0:
@@ -312,13 +321,13 @@ def test_model(sequence_len, test_type="val",model_path=MODEL_PATH):
             long = True
 
         # simulate trading
-        if not long and buy > buy_threshold:
+        if not long and buy == mp:
             btc_holds = eur_capital/(close_backup[i]*(1.0+fee))
             buy_price = close_backup[i]
             eur_capital = 0.0
             long = True
 
-        if long and sell > sell_threshold and close_backup[i] > (buy_price * 1.01):
+        if long and sell == mp:
             print("profit event :",  (close_backup[i]-buy_price)/buy_price * 100.0, " btc holds ",btc_holds)
             eur_capital = btc_holds * close_backup[i] * (1.0 - fee)
             long = False
@@ -368,7 +377,7 @@ def build_model(**parameters):
     model.add(Dense(32, activation='relu'))
     model.add(Dropout(Dropout_04))
 
-    model.add(Dense(2, activation='softmax'))
+    model.add(Dense(3, activation='softmax'))
 
     opt = tf.keras.optimizers.Adam(lr=learning_rate, decay=decay_adam)  # lr=0.001, decay=1e-6
 
@@ -510,19 +519,21 @@ def cycle_predictions(sequence_len=SEQUENCE_LEN):
 
     log_file = open("predictions.txt", "w+")
     results = []
-    previus_action = -1
-    previus_price = -1
+    action = -999
+    price = -999
     long = False
     buy_price = 0
 
     while (1):
         current_time = datetime.now().timetuple()
         if current_time.tm_min == 0 : #check every hour
-            date, current_price, buy, sell = predict_next(sequence_len, loaded_model)
+            date, current_price, sell, keep, buy = predict_next(sequence_len, loaded_model)
             correct = 0
-            if current_price > previus_price and previus_action == 1:
+            if current_price > price * (1 + MARGIN_PERCENT) and action == 2:
                 correct = 1
-            if current_price < previus_price and previus_action == 0:
+            if current_price < price * (1 - MARGIN_PERCENT) and action == 0:
+                correct = 1
+            if current_price <= price * (1 + MARGIN_PERCENT) and current_price >= price * (1 - MARGIN_PERCENT) and action == 1:
                 correct = 1
             row = str("date " + date + " current_price " + str(current_price)
                       + " buy " + str(buy) + " sell " + str(sell) + " correct " + str(correct) + "\n")
@@ -530,18 +541,22 @@ def cycle_predictions(sequence_len=SEQUENCE_LEN):
             log_file.flush()
             results.append([date, current_price, buy, sell, correct])
 
-            previus_price = current_price
-            if sell > buy:
-                previus_action = 0
-            else:
-                previus_action = 1
+            mp = max([sell, keep, buy])
+            price = current_price
 
-            if not long and buy > 0.50:
+            if sell == mp:
+                action = 0
+            elif keep == mp:
+                action = 1
+            elif buy == mp:
+                action = 2
+
+            if not long and action == 1:
                 text = "buy: " + str(buy) + ' ' + str(sell) + ' ' + str(current_price)
                 long = True
                 sendEmail("btcpred", text, e, p)
                 buy_price = current_price
-            if long and buy < 0.50 : #and current_price > (buy_price * 1.01):
+            if long and action == -1 : #and current_price > (buy_price * 1.01):
                 text = "sell: " + str(buy) + ' ' + str(sell) + ' ' + str(current_price)
                 long = False
                 sendEmail("btcpred", text, e, p)
