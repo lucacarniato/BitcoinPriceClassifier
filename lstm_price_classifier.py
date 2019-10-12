@@ -21,14 +21,15 @@ PRICE_HEADERS = ['Open', 'High', 'Low', 'Close', 'VolumeFrom']
 PRICE_DATA="training_datas/coinbase-1h-btc-eur-api.csv"
 SENTIMENT_DATA="training_datas/sentiment.csv"
 SENTIMENT_DATA_TOTAL = None #"training_datas/sentiment_total.csv"
-SEQUENCE_LEN = int(45.6193325687566)
+SEQUENCE_LEN = 72
 NUM_NEURONS = 128
 BATCH_SIZE = 128
-EPOCHS = 20  # 20 how many passes through our data
+EPOCHS = 10  # how many passes through our data
 SAVE_MODEL = True
 SENTIMENT_HEADERS =[]
 VERBOSE = False
-MARGIN_PERCENT = 0.005
+MARGIN_PERCENT = 0.0055
+PROBABILITY_THRESHOLD = 1.0/3.0 #0.5
 
 ########################################################################################################################
 # optimization
@@ -42,23 +43,11 @@ def optuna_optimization():
 
 def model_parameter_distributions(trial):
     return {
-        'Dropout_01': trial.suggest_loguniform('Dropout_01', 0.05, 0.5),
-        'Dropout_02': trial.suggest_loguniform('Dropout_02', 0.05, 0.5),
-        'Dropout_03': trial.suggest_loguniform('Dropout_03', 0.05, 0.5),
-        'Dropout_04': trial.suggest_loguniform('Dropout_04', 0.05, 0.5),
-        'learning_rate': trial.suggest_loguniform('learning_rate', 0.0001, 0.01),
-        'decay_adam': trial.suggest_loguniform('decay_adam', 1e-8, 1e-4),
-        'sequence_len': int(trial.suggest_int('sequence_len', 6, 24 * 3)),
+        'sequence_len': int(trial.suggest_int('sequence_len', 6, 24 * 5))
     }
 
 def run_base_model(**parameters):
-    parameters['Dropout_01'] = 0.2
-    parameters['Dropout_02'] = 0.1
-    parameters['Dropout_03'] = 0.2
-    parameters['Dropout_04'] = 0.2
-    parameters['learning_rate'] = 0.00247848126819933
-    parameters['decay_adam'] = 5.87529568055265e-05
-    parameters['sequence_len'] = int(45.6193325687566)
+    parameters['sequence_len'] = SEQUENCE_LEN
     build_model(**parameters)
 
 def optimize_model(trial):
@@ -190,7 +179,6 @@ def classify_sb(current, future):
 def prepare_sequential_data(main_df, sequence_len):
     df = main_df.copy(deep=True)
     df = df.drop("future", 1)  # don't need this anymore.
-    # print(df.head())
 
     for col in df.columns:
         if col != "target":  #
@@ -217,8 +205,11 @@ def prepare_sequential_data(main_df, sequence_len):
     close_backup =[]
     prev_days = deque(maxlen=sequence_len)
 
+    print("column used: ", df.columns[:-2])
+    print("target column: ", df.columns[-2])
+
     for i in df.values:
-        prev_days.append([n for n in i[:-2]]) #i[:-1]
+        prev_days.append([n for n in i[:-2]])
         if len(prev_days) == sequence_len:
             sequential_data.append([preprocessing.scale(np.array(prev_days)), i[-2]])
             close_backup.append(i[-1])
@@ -262,7 +253,7 @@ def process_sb_df(df, sequence_len):
 
     return np.array(X), y
 
-def test_model(sequence_len, test_type="val",model_path=MODEL_PATH):
+def test_model(sequence_len=SEQUENCE_LEN, test_type="val",model_path=MODEL_PATH):
 
     main_df, validation_main_df = build_test_validation_df()
     print('load model from ', model_path)
@@ -314,21 +305,19 @@ def test_model(sequence_len, test_type="val",model_path=MODEL_PATH):
                 correct += 1
 
         if i == 0:
-            btc_holding = eur_capital/(close_backup[i]*(1.0+fee))
-            btc_holds = eur_capital/(close_backup[i]*(1.0+fee))
-            buy_price = close_backup[i]
-            eur_capital = 0.0
-            long = True
+            print("initial price :", close_backup[0])
+            btc_hodl = eur_capital/(close_backup[0]*(1.0+fee))
 
         # simulate trading
-        if not long and buy == mp:
+        if not long and buy > PROBABILITY_THRESHOLD:
+            print("buy event, price :", close_backup[i])
             btc_holds = eur_capital/(close_backup[i]*(1.0+fee))
             buy_price = close_backup[i]
             eur_capital = 0.0
             long = True
 
-        if long and sell == mp:
-            print("profit event :",  (close_backup[i]-buy_price)/buy_price * 100.0, " btc holds ",btc_holds)
+        if long and sell > PROBABILITY_THRESHOLD:
+            print("sell event, price :", close_backup[i], " profit :",  (close_backup[i]-buy_price)/buy_price * 100.0, " btc holds: ",btc_holds)
             eur_capital = btc_holds * close_backup[i] * (1.0 - fee)
             long = False
 
@@ -336,18 +325,11 @@ def test_model(sequence_len, test_type="val",model_path=MODEL_PATH):
     # plt.plot(yhat_labels, y_sequential, 'o', color='black')
     print("correct percentage: ", correct / len(yhat))
     print("The capitalization is: ", btc_holds * close_backup[-1] + eur_capital, " is long?: ", long)
-    print("The hodl value  is: ", close_backup[-1] * btc_holding, " with n ", btc_holding, " initial btc")
+    print("The hodl value  is: ", close_backup[-1]* (1.0-fee) * btc_hodl, " with n ", btc_hodl, " btc hodl")
 
 def build_model(**parameters):
 
-    Dropout_01 = parameters['Dropout_01']
-    Dropout_02 = parameters['Dropout_02']
-    Dropout_03 = parameters['Dropout_03']
-    Dropout_04 = parameters['Dropout_04']
-    learning_rate = parameters['learning_rate']
     sequence_len = parameters['sequence_len']
-    decay_adam = parameters['decay_adam']
-
     main_df, validation_main_df = build_test_validation_df()
 
     if VERBOSE:
@@ -363,23 +345,23 @@ def build_model(**parameters):
 
     model = Sequential()
     model.add(LSTM(NUM_NEURONS, input_shape=(train_x.shape[1:]), return_sequences=True))
-    model.add(Dropout(Dropout_01))
+    model.add(Dropout(0.2))
     model.add(BatchNormalization())
 
     model.add(LSTM(NUM_NEURONS, return_sequences=True))
-    model.add(Dropout(Dropout_02))
+    model.add(Dropout(0.1))
     model.add(BatchNormalization())
 
     model.add(LSTM(NUM_NEURONS))
-    model.add(Dropout(Dropout_03))
+    model.add(Dropout(0.2))
     model.add(BatchNormalization())
 
     model.add(Dense(32, activation='relu'))
-    model.add(Dropout(Dropout_04))
+    model.add(Dropout(0.2))
 
     model.add(Dense(3, activation='softmax'))
 
-    opt = tf.keras.optimizers.Adam(lr=learning_rate, decay=decay_adam)  # lr=0.001, decay=1e-6
+    opt = tf.keras.optimizers.Adam(lr=0.001, decay=1e-6)  # lr=0.001, decay=1e-6
 
     # Compile model
     model.compile(loss='sparse_categorical_crossentropy', optimizer=opt, metrics=['accuracy'])
@@ -569,6 +551,6 @@ def cycle_predictions(sequence_len=SEQUENCE_LEN):
 
 if __name__ == '__main__':
     # run_base_model()
-    # optuna_optimization()
+    optuna_optimization()
     # run_base_model()
-    cycle_predictions()
+    # cycle_predictions()
