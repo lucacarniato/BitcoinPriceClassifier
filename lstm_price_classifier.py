@@ -16,20 +16,22 @@ import optuna
 
 MODEL_PATH = "models/model"
 FUTURE_PERIOD_PREDICT = 1
-VALIDATION_PERCENT = 0.20
+TEST_PERCENT = 0.10
+VALIDATION_PERCENT = 0.10
 PRICE_HEADERS = ['Open', 'High', 'Low', 'Close', 'VolumeFrom']
-PRICE_DATA="training_datas/coinbase-1h-btc-eur-api.csv"
-SENTIMENT_DATA="training_datas/sentiment.csv"
-SENTIMENT_DATA_TOTAL = None #"training_datas/sentiment_total.csv"
-SEQUENCE_LEN = 72
-NUM_NEURONS = 128
-BATCH_SIZE = 128
-EPOCHS = 10  # how many passes through our data
-SAVE_MODEL = True
-SENTIMENT_HEADERS =[]
+PRICE_DATA = "training_datas/coinbase-1h-btc-eur-api.csv"
+SENTIMENT_DATA = "training_datas/sentiment.csv"
+SENTIMENT_DATA_TOTAL = None  # "training_datas/sentiment_total.csv"
+SENTIMENT_HEADERS = []
+RUN_WITH_BEST_PARAMETERS = False
+
+
+SEQUENCE_LEN = 24*10 #119
+NUM_UNITS = 128
 VERBOSE = False
 MARGIN_PERCENT = 0.0055
-PROBABILITY_THRESHOLD = 1.0/3.0 #0.5
+PROBABILITY_THRESHOLD = 0.51  # 0.5
+
 
 ########################################################################################################################
 # optimization
@@ -43,12 +45,18 @@ def optuna_optimization():
 
 def model_parameter_distributions(trial):
     return {
-        'sequence_len': int(trial.suggest_int('sequence_len', 6, 24 * 5))
+        'dropout_01': trial.suggest_loguniform('dropout_01', 0.05, 0.5),
+        'dropout_02': trial.suggest_loguniform('dropout_02', 0.05, 0.5),
+        'sequence_len': int(trial.suggest_int('sequence_len', 6, 24 * 10))
     }
+
 
 def run_base_model(**parameters):
     parameters['sequence_len'] = SEQUENCE_LEN
+    parameters['dropout_01'] = 0.2
+    parameters['dropout_02'] = 0.1
     build_model(**parameters)
+
 
 def optimize_model(trial):
     parameters = model_parameter_distributions(trial)
@@ -56,7 +64,7 @@ def optimize_model(trial):
 
 
 ########################################################################################################################
-# File IO
+# Data preparation
 ########################################################################################################################
 
 def get_historical_data():
@@ -66,7 +74,7 @@ def get_historical_data():
     from calendar import timegm
 
     public_client = cbpro.PublicClient()
-    start_date_his = '2019-07-14T21:00:00.0' #2019-07-14T21:00:00Z
+    start_date_his = '2019-07-14T21:00:00.0'  # 2019-07-14T21:00:00Z
     end_date_his = '2019-10-10T12:00:00.0'
 
     granularity = 3600
@@ -114,10 +122,10 @@ def get_historical_data():
     df['Date'] = df['Date'].apply(lambda d: time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime(d)))
 
     df.set_index("Date", inplace=True)
-    df.to_csv('training_datas/last_chunk.csv')
+    df.to_csv(PRICE_DATA)
+
 
 def build_test_validation_df(price_data=PRICE_DATA, sentiment_data=None):
-
     main_df = pd.read_csv(price_data)
     main_df = main_df.sort_values(by=['Date'])
     main_df.set_index("Date", inplace=True)
@@ -127,7 +135,7 @@ def build_test_validation_df(price_data=PRICE_DATA, sentiment_data=None):
 
     # drop 0 volume
     main_df = main_df[main_df.VolumeFrom != 0]
-    #main_df = main_df.tail(10000)
+    # main_df = main_df.tail(10000)
 
     # Append sentiment data
     sentiment_data = SENTIMENT_DATA_TOTAL
@@ -151,22 +159,24 @@ def build_test_validation_df(price_data=PRICE_DATA, sentiment_data=None):
         main_df.dropna(inplace=True)
 
         print(main_df.head())
-        #main_df.to_csv('training_datas/tests/result.csv')
+        # main_df.to_csv('training_datas/tests/result.csv')
 
     main_df['future'] = main_df['Close'].shift(-FUTURE_PERIOD_PREDICT)
     main_df['target'] = list(map(classify_sb, main_df['Close'], main_df['future']))
     main_df.dropna(inplace=True)
 
-    ## here, split away some slice of the future data from the main main_df.
-    times = sorted(main_df.index.values)
-    last = sorted(main_df.index.values)[-int(VALIDATION_PERCENT * len(times))]
+    dates = sorted(main_df.index.values)
+    dev_split = dates[-int((TEST_PERCENT + VALIDATION_PERCENT) * len(dates))]
+    val_split = dates[-int(VALIDATION_PERCENT * len(dates))]
 
-    validation_main_df = main_df[(main_df.index >= last)]
-    main_df = main_df[(main_df.index < last)]
+    dev_df = main_df[(main_df.index < dev_split)]
+    test_df = main_df[(dev_split <= main_df.index) & (main_df.index < val_split)]
+    val_df = main_df[(main_df.index >= val_split)]
 
-    return main_df, validation_main_df
+    print("dev : ", len(dev_df), ", test :", len(test_df), ", valid :", len(val_df))
 
-########################################################################################################################
+    return dev_df, test_df, val_df
+
 
 def classify_sb(current, future):
     if float(future) < float(current * (1.0 - MARGIN_PERCENT)):
@@ -175,6 +185,7 @@ def classify_sb(current, future):
         return 2  # buy
     else:
         return 1  # keep
+
 
 def prepare_sequential_data(main_df, sequence_len):
     df = main_df.copy(deep=True)
@@ -202,7 +213,7 @@ def prepare_sequential_data(main_df, sequence_len):
     df.dropna(inplace=True)
 
     sequential_data = []
-    close_backup =[]
+    close_backup = []
     prev_days = deque(maxlen=sequence_len)
 
     print("column used: ", df.columns[:-2])
@@ -216,6 +227,10 @@ def prepare_sequential_data(main_df, sequence_len):
 
     return sequential_data, close_backup
 
+
+########################################################################################################################
+# MODEL
+########################################################################################################################
 
 def process_sb_df(df, sequence_len):
     sequential_data, close_backup = prepare_sequential_data(df, sequence_len)
@@ -253,17 +268,89 @@ def process_sb_df(df, sequence_len):
 
     return np.array(X), y
 
-def test_model(sequence_len=SEQUENCE_LEN, test_type="val",model_path=MODEL_PATH):
+def create_model(input_shape,dropout_01,dropout_02):
 
-    main_df, validation_main_df = build_test_validation_df()
-    print('load model from ', model_path)
-    loaded_model = tf.keras.models.load_model(model_path)
+    model = Sequential()
+    model.add(LSTM(NUM_UNITS, input_shape=input_shape, return_sequences=True))
+    model.add(Dropout(dropout_01))
+    model.add(BatchNormalization())
 
-    # cross plot
-    if test_type=="val":
-        sequential_data, close_backup = prepare_sequential_data(validation_main_df, sequence_len)
-    if test_type == "train":
-        sequential_data, close_backup = prepare_sequential_data(main_df, sequence_len)
+    model.add(LSTM(NUM_UNITS, return_sequences=True))
+    model.add(Dropout(dropout_02))
+    model.add(BatchNormalization())
+
+    model.add(LSTM(NUM_UNITS))
+    model.add(Dropout(dropout_01))
+    model.add(BatchNormalization())
+
+    model.add(Dense(32, activation='relu'))
+    model.add(Dropout(0.1))
+
+    model.add(Dense(3, activation='softmax'))
+
+    if VERBOSE:
+        model.summary()
+
+    opt = tf.keras.optimizers.Adam(lr=0.001, decay=1e-6)  # lr=0.001, decay=1e-6
+
+    model.compile(loss='sparse_categorical_crossentropy', optimizer=opt, metrics=['accuracy'])
+
+    return model
+
+def build_model(**parameters):
+    sequence_len = parameters['sequence_len']
+    dropout_01 = parameters['dropout_01']
+    dropout_02 = parameters['dropout_02']
+    dev_df, test_df, val_df = build_test_validation_df()
+
+    if VERBOSE:
+        (dev_df.head())
+
+    train_x, train_y = process_sb_df(dev_df, sequence_len)
+    test_x, test_y = process_sb_df(test_df, sequence_len)
+
+    print("train sells: ", train_y.count(0), ", holds: ", train_y.count(1), ", buys: ", train_y.count(2))
+    print("test sells: ", test_y.count(0), ", holds:", test_y.count(1), ", buys: ", test_y.count(2))
+    print("sequence_len: ", sequence_len," ,dropout_01: ",dropout_01," ,dropout_02: ",dropout_02)
+
+    input_shape = (train_x.shape[1:])
+    # Train model
+    from keras.wrappers.scikit_learn import KerasClassifier
+    model = KerasClassifier(build_fn=create_model, input_shape=input_shape, dropout_01=dropout_01, dropout_02=dropout_02,
+                            epochs=10, batch_size=128, verbose=1)
+
+    score = -999.0
+    if RUN_WITH_BEST_PARAMETERS:
+        model.fit(train_x,train_y)
+        model.save(MODEL_PATH)
+    else:
+        from sklearn.model_selection import cross_val_score
+        score = np.mean(cross_val_score(model, train_x, train_y, cv=3))
+
+    print("average score: ", score)
+
+    return -score
+
+
+########################################################################################################################
+# TEST MODEL
+########################################################################################################################
+
+def test_model(data_type="val", probability=PROBABILITY_THRESHOLD, model_path=MODEL_PATH, model=None):
+
+    print("data_type: ", data_type)
+    dev_df, test_df, val_df = build_test_validation_df()
+
+    if not model:
+        print('load model from ', model_path)
+        model = tf.keras.models.load_model(model_path)
+
+    if data_type == "dev":
+        sequential_data, close_backup = prepare_sequential_data(dev_df, SEQUENCE_LEN)
+    if data_type == "test":
+        sequential_data, close_backup = prepare_sequential_data(test_df, SEQUENCE_LEN)
+    if data_type == "val":
+        sequential_data, close_backup = prepare_sequential_data(val_df, SEQUENCE_LEN)
 
     X_sequential = []
     y_sequential = []
@@ -272,13 +359,13 @@ def test_model(sequence_len=SEQUENCE_LEN, test_type="val",model_path=MODEL_PATH)
         y_sequential.append(target)
 
     single_input = np.array(X_sequential)
-    yhat = loaded_model.predict(single_input, verbose=0)
+    yhat = model.predict(single_input, verbose=0)
 
     yhat_labels = []
     correct = 0
     long = False
     buy_price = -1.0
-    fee = 0.25/100.0
+    fee = 0.25 / 100.0
     eur_capital = 1000.0
     btc_holds = 0.0
     for i in range(0, len(yhat)):
@@ -306,93 +393,105 @@ def test_model(sequence_len=SEQUENCE_LEN, test_type="val",model_path=MODEL_PATH)
 
         if i == 0:
             print("initial price :", close_backup[0])
-            btc_hodl = eur_capital/(close_backup[0]*(1.0+fee))
+            btc_hodl = eur_capital / (close_backup[0] * (1.0 + fee))
 
         # simulate trading
-        if not long and buy > PROBABILITY_THRESHOLD:
-            print("buy event, price :", close_backup[i])
-            btc_holds = eur_capital/(close_backup[i]*(1.0+fee))
+        if not long and buy > probability:
+            print("buy event, price :", close_backup[i], " ,sell ", sell, " ,buy ", buy)
+            btc_holds = eur_capital / (close_backup[i] * (1.0 + fee))
             buy_price = close_backup[i]
             eur_capital = 0.0
             long = True
 
-        if long and sell > PROBABILITY_THRESHOLD:
-            print("sell event, price :", close_backup[i], " profit :",  (close_backup[i]-buy_price)/buy_price * 100.0, " btc holds: ",btc_holds)
+        elif long and sell > probability:
+            print("sell event, price :", close_backup[i], " ,sell ", sell, " ,buy ", buy,
+                  " ,profit :", (close_backup[i] - buy_price) / buy_price * 100.0, " ,btc holds: ", btc_holds)
             eur_capital = btc_holds * close_backup[i] * (1.0 - fee)
             long = False
 
     import matplotlib.pyplot as plt
     # plt.plot(yhat_labels, y_sequential, 'o', color='black')
+    total_capitalization = btc_holds * close_backup[-1] + eur_capital
     print("correct percentage: ", correct / len(yhat))
-    print("The capitalization is: ", btc_holds * close_backup[-1] + eur_capital, " is long?: ", long)
-    print("The hodl value  is: ", close_backup[-1]* (1.0-fee) * btc_hodl, " with n ", btc_hodl, " btc hodl")
+    print("The capitalization is: ", total_capitalization, " is long?: ", long)
+    print("The hodl value  is: ", close_backup[-1] * (1.0 - fee) * btc_hodl, " with n ", btc_hodl, " btc hodl")
 
-def build_model(**parameters):
-
-    sequence_len = parameters['sequence_len']
-    main_df, validation_main_df = build_test_validation_df()
-
-    if VERBOSE:
-        (main_df.head())
-
-    train_x, train_y = process_sb_df(main_df, sequence_len)
-    validation_x, validation_y = process_sb_df(validation_main_df, sequence_len)
-
-    if VERBOSE:
-        print(f"train data: {len(train_x)} validation: {len(validation_x)}")
-        print(f"Sells: {train_y.count(0)}, holds: {train_y.count(1)}, buys: {train_y.count(2)}")
-        print(f"VALIDATION  {validation_y.count(0)}, holds: {validation_y.count(1)}, buys: {validation_y.count(2)}")
-
-    model = Sequential()
-    model.add(LSTM(NUM_NEURONS, input_shape=(train_x.shape[1:]), return_sequences=True))
-    model.add(Dropout(0.2))
-    model.add(BatchNormalization())
-
-    model.add(LSTM(NUM_NEURONS, return_sequences=True))
-    model.add(Dropout(0.1))
-    model.add(BatchNormalization())
-
-    model.add(LSTM(NUM_NEURONS))
-    model.add(Dropout(0.2))
-    model.add(BatchNormalization())
-
-    model.add(Dense(32, activation='relu'))
-    model.add(Dropout(0.2))
-
-    model.add(Dense(3, activation='softmax'))
-
-    opt = tf.keras.optimizers.Adam(lr=0.001, decay=1e-6)  # lr=0.001, decay=1e-6
-
-    # Compile model
-    model.compile(loss='sparse_categorical_crossentropy', optimizer=opt, metrics=['accuracy'])
-
-    # TensorBoard(log_dir="logs\{}".format(NAME))
-    tensorboard = None
-    filepath = "RNN_Final-{epoch:02d}"
-    checkpoint = ModelCheckpoint(
-        "models\{}.model".format(filepath, monitor='val_acc', verbose=1, save_best_only=True, mode='max'))
-
-    # Train model
-    model.fit(train_x, train_y, batch_size=BATCH_SIZE, epochs=EPOCHS,
-              validation_data=(validation_x, validation_y))  # callbacks=[tensorboard,checkpoint]
-
-    # Score model
-    length_valid = int(len(validation_x)/2)
-    score = model.evaluate(validation_x[:length_valid], validation_y[:length_valid], verbose=0)
-    print('Test loss:', score[0])
-    print('Test accuracy:', score[1])
-
-    if SAVE_MODEL:
-        model.save(MODEL_PATH)
-
-    return -score[1]
-
-def update_csv_data():
-    from update_data import download_data_async
-    download_data_async()
+    return total_capitalization
 
 
-def predict_next(sequence_len, loaded_model=None):
+########################################################################################################################
+# GO LIVE
+########################################################################################################################
+
+def cycle_predictions():
+    from datetime import datetime
+    import time
+    import os
+
+    pFile = open("pFile.txt", "r")
+    e = pFile.readline()
+    p = pFile.readline()
+    pFile.close()
+    os.remove("pFile.txt")
+    sendEmail("btcpred", "starting", e, p)
+
+    modelPath = "models/model"
+    print('model path is', modelPath)
+    loaded_model = tf.keras.models.load_model(modelPath)
+
+    log_file = open("predictions.txt", "w+")
+    results = []
+    action = -999
+    price = -999
+    long = False
+    buy_price = 0
+
+    while (1):
+        current_time = datetime.now().timetuple()
+        if current_time.tm_min == 0:  # check every hour
+            date, current_price, sell, keep, buy = predict_next(loaded_model)
+            correct = 0
+            if current_price > price * (1 + MARGIN_PERCENT) and action == 2:
+                correct = 1
+            if current_price < price * (1 - MARGIN_PERCENT) and action == 0:
+                correct = 1
+            if current_price <= price * (1 + MARGIN_PERCENT) and current_price >= price * (
+                    1 - MARGIN_PERCENT) and action == 1:
+                correct = 1
+            row = str("date " + date + " current_price " + str(current_price)
+                      + " buy " + str(buy) + " sell " + str(sell) + " correct " + str(correct) + "\n")
+            log_file.write(row)
+            log_file.flush()
+            results.append([date, current_price, buy, sell, correct])
+
+            mp = max(sell, keep, buy)
+            price = current_price
+
+            if sell == mp and sell > PROBABILITY_THRESHOLD:
+                action = 0
+            elif buy == mp and buy > PROBABILITY_THRESHOLD:
+                action = 2
+            else:
+                action = 1
+
+            if not long and action == 2:
+                text = "buy: " + str(buy) + ' ' + str(sell) + ' ' + str(current_price)
+                long = True
+                sendEmail("btcpred", text, e, p)
+                buy_price = current_price
+
+            if long and action == 0:  # and current_price > (buy_price * 1.01):
+                text = "sell: " + str(buy) + ' ' + str(sell) + ' ' + str(current_price)
+                long = False
+                sendEmail("btcpred", text, e, p)
+
+        print('sleeping...')
+        time.sleep(60)
+
+    log_file.close()
+
+
+def predict_next(loaded_model=None):
     import cbpro
     from datetime import datetime
     from calendar import timegm
@@ -400,7 +499,7 @@ def predict_next(sequence_len, loaded_model=None):
 
     granularity = 3600
     end_epoch = timegm(datetime.now().timetuple())
-    start_epoch = end_epoch - (granularity * sequence_len * 2)
+    start_epoch = end_epoch - (granularity * SEQUENCE_LEN * 2)
 
     start_struct_time = time.gmtime(start_epoch)
     end_struct_time = time.gmtime(end_epoch)
@@ -446,7 +545,7 @@ def predict_next(sequence_len, loaded_model=None):
           ' High ', last_high, ' Low ', last_low)
 
     # prepare data
-    sequential_data, close_backup = prepare_sequential_data(main_df, sequence_len)
+    sequential_data, close_backup = prepare_sequential_data(main_df, SEQUENCE_LEN)
     X_sequential = []
     y_sequential = []
     for seq, target in sequential_data:
@@ -482,71 +581,6 @@ def sendEmail(Subject, text, e, p):
 
     server.sendmail(e, e, msg.as_string())
     server.quit()
-
-def cycle_predictions(sequence_len=SEQUENCE_LEN):
-    from datetime import datetime
-    import time
-    import os
-
-    pFile = open("pFile.txt", "r")
-    e = pFile.readline()
-    p = pFile.readline()
-    pFile.close()
-    os.remove("pFile.txt")
-    sendEmail("btcpred", "starting", e, p)
-
-    modelPath = "models/model"
-    print('model path is', modelPath)
-    loaded_model = tf.keras.models.load_model(modelPath)
-
-    log_file = open("predictions.txt", "w+")
-    results = []
-    action = -999
-    price = -999
-    long = False
-    buy_price = 0
-
-    while (1):
-        current_time = datetime.now().timetuple()
-        if current_time.tm_min == 0 : #check every hour
-            date, current_price, sell, keep, buy = predict_next(sequence_len, loaded_model)
-            correct = 0
-            if current_price > price * (1 + MARGIN_PERCENT) and action == 2:
-                correct = 1
-            if current_price < price * (1 - MARGIN_PERCENT) and action == 0:
-                correct = 1
-            if current_price <= price * (1 + MARGIN_PERCENT) and current_price >= price * (1 - MARGIN_PERCENT) and action == 1:
-                correct = 1
-            row = str("date " + date + " current_price " + str(current_price)
-                      + " buy " + str(buy) + " sell " + str(sell) + " correct " + str(correct) + "\n")
-            log_file.write(row)
-            log_file.flush()
-            results.append([date, current_price, buy, sell, correct])
-
-            mp = max([sell, keep, buy])
-            price = current_price
-
-            if sell == mp:
-                action = 0
-            elif keep == mp:
-                action = 1
-            elif buy == mp:
-                action = 2
-
-            if not long and action == 1:
-                text = "buy: " + str(buy) + ' ' + str(sell) + ' ' + str(current_price)
-                long = True
-                sendEmail("btcpred", text, e, p)
-                buy_price = current_price
-            if long and action == -1 : #and current_price > (buy_price * 1.01):
-                text = "sell: " + str(buy) + ' ' + str(sell) + ' ' + str(current_price)
-                long = False
-                sendEmail("btcpred", text, e, p)
-
-        print('sleeping...')
-        time.sleep(60)
-
-    log_file.close()
 
 
 if __name__ == '__main__':
