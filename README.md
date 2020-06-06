@@ -16,7 +16,7 @@ Model fitting:
 
 Hyperparameter tuning:
 
-•	By using [Optuna](http://www.dropwizard.io/1.0.2/docs/). In this case the length of the sequence and the dropout fractions are explored to maximize the cross-validation score.
+•	By using [Optuna](https://github.com/optuna/optuna). In this case the length of the sequence and the dropout fractions are explored to maximize the cross-validation score.
 
 Live predictions
 
