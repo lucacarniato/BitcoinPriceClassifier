@@ -5,10 +5,10 @@ This project attempts to predict the next hour bitcoin close price. In order to 
 
 Data preparation:
 
-•	Downloads historical hourly open, high, low, close and volume price data from Coinbase, saves them to file.
-•	Makes the series stationary by applying percent transformations.
-•	Creates the sequences composed by all past and present data.
-•	Creates three labels for the next closing price: 0 (sell action) if the close price is below the current price minus a percent margin, 1 (keep action) if the close price is within the margin and 2 (buy action) if the next price is above the current price plus the margin.
+* Downloads historical hourly open, high, low, close and volume price data from Coinbase, saves them to file.
+* Makes the series stationary by applying percent transformations.
+* Creates the sequences composed by all past and present data.
+* Creates three labels for the next closing price: 0 (sell action) if the close price is below the current price minus a percent margin, 1 (keep action) if the close price is within the margin and 2 (buy action) if the next price is above the current price plus the margin.
 
 Model fitting:
 
