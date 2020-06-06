@@ -12,15 +12,15 @@ Data preparation:
 
 Model fitting:
 
-•	Computes the 3-fold cross validation score, used in the hyperparameter tuning (see below)
+* Computes the 3-fold cross validation score, used in the hyperparameter tuning (see below)
 
 Hyperparameter tuning:
 
-•	By using [Optuna](https://github.com/optuna/optuna). In this case the length of the sequence and the dropout fractions are explored to maximize the cross-validation score.
+* By using [Optuna](https://github.com/optuna/optuna). In this case the length of the sequence and the dropout fractions are explored to maximize the cross-validation score.
 
 Live predictions
 
-•	Retrieves hourly data from Coinbase and notifies the subscriber(s) by email when the price is predicted to change more than the prescribed margin.
+* Retrieves hourly data from Coinbase and notifies the subscriber(s) by email when the price is predicted to change more than the prescribed margin.
 
 
 ## License
