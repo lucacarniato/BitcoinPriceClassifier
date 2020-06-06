@@ -1,4 +1,4 @@
-# Bitcoin LSTM classifier with email notification
+# Bitcoin LSTM price classifier
 
 
 This project attempts to predict the next hour bitcoin close price. In order to do so, it uses an LSTM network and scrapes the price data from Coinbase. 
